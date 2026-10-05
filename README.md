@@ -20,11 +20,11 @@ Windows 把 `t.exe` 放进 PATH 即可；Linux/macOS 放到 `/usr/local/bin`。
 | 变量 | 说明 | 默认 |
 |---|---|---|
 | T_LANG | 目标语言 | zh-CN |
-| T_BACKEND | `google`（免 Key 非官方接口）/ `openai`（兼容接口，DeepSeek、Ollama 也行） | google |
+| T_BACKEND | `auto`（默认：先探测 Google，3 秒内通就用，否则用 Edge/Bing）/ `google` / `edge`（或 `bing`）/ `openai`（兼容接口，DeepSeek、Ollama 也行） | auto |
 | T_API_BASE | openai 后端地址 | https://api.openai.com/v1 |
 | T_API_KEY / T_MODEL | openai 后端的 Key / 模型 | - / gpt-4o-mini |
 
-缓存：`~/.t-translate/cache.json`，`--no-cache` 关闭。
+缓存：`~/.t-translate/cache.json`，有效期 30 天，`--no-cache` 关闭，`t --cache` 查看。
 
 ## 行为
 

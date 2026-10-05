@@ -131,13 +131,27 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
 
 // ---------------------------------------------------------------- translator
 
+const CACHE_TTL_SECS: u64 = 30 * 24 * 3600; // entries live for 30 days
+const GOOGLE_PROBE_SECS: u64 = 3;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 struct Translator {
     lang: String,
-    backend: String,
+    /// "auto" (default): google if reachable within 3s, else edge | google | edge | openai
+    active: String,
+    auto: bool,
+    resolved: bool,
+    edge_token: std::cell::RefCell<Option<String>>,
     api_base: String,
     api_key: String,
     model: String,
-    cache: HashMap<String, String>,
+    cache: HashMap<String, (String, u64)>, // key -> (translation, unix ts)
     cache_path: Option<PathBuf>,
     dirty: bool,
     use_cache: bool,
@@ -150,19 +164,31 @@ impl Translator {
             .ok()
             .map(PathBuf::from);
         let cache_path = home.map(|h| h.join(".t-translate").join("cache.json"));
-        let mut cache = HashMap::new();
+        let mut cache: HashMap<String, (String, u64)> = HashMap::new();
         if use_cache {
             if let Some(p) = &cache_path {
                 if let Ok(s) = std::fs::read_to_string(p) {
-                    if let Ok(m) = serde_json::from_str::<HashMap<String, String>>(&s) {
-                        cache = m;
+                    if let Ok(m) = serde_json::from_str::<HashMap<String, (String, u64)>>(&s) {
+                        let now = now_secs();
+                        cache = m
+                            .into_iter()
+                            .filter(|(_, (_, ts))| now.saturating_sub(*ts) < CACHE_TTL_SECS)
+                            .collect();
                     }
                 }
             }
         }
+        let mut backend = std::env::var("T_BACKEND").unwrap_or_else(|_| "auto".into());
+        if backend == "bing" {
+            backend = "edge".into();
+        }
+        let auto = backend == "auto";
         Translator {
             lang,
-            backend: std::env::var("T_BACKEND").unwrap_or_else(|_| "google".into()),
+            resolved: !auto,
+            active: backend,
+            auto,
+            edge_token: std::cell::RefCell::new(None),
             api_base: std::env::var("T_API_BASE")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".into()),
             api_key: std::env::var("T_API_KEY").unwrap_or_default(),
@@ -172,6 +198,19 @@ impl Translator {
             dirty: false,
             use_cache,
         }
+    }
+
+    /// auto mode: probe Google once (3s budget), otherwise use Edge/Bing.
+    fn ensure_backend(&mut self) {
+        if self.resolved {
+            return;
+        }
+        self.resolved = true;
+        self.active = if self.google_with("hello", GOOGLE_PROBE_SECS).is_some() {
+            "google".into()
+        } else {
+            "edge".into()
+        };
     }
 
     fn save(&mut self) {
@@ -198,11 +237,14 @@ impl Translator {
         let mut result: Vec<Option<String>> = vec![None; texts.len()];
         let mut todo: Vec<usize> = Vec::new();
         for (i, t) in texts.iter().enumerate() {
-            if let Some(v) = self.cache.get(&self.key(t)) {
+            if let Some((v, _)) = self.cache.get(&self.key(t)) {
                 result[i] = Some(v.clone());
             } else {
                 todo.push(i);
             }
+        }
+        if !todo.is_empty() {
+            self.ensure_backend();
         }
         // chunk by size so GET urls stay short
         let mut start = 0;
@@ -215,7 +257,13 @@ impl Translator {
             }
             let idxs = &todo[start..end];
             let chunk: Vec<String> = idxs.iter().map(|&i| texts[i].trim().to_string()).collect();
-            let translated = self.call_backend(&chunk).or_else(|| {
+            let mut first = self.call_backend(&chunk);
+            if first.is_none() && self.auto && self.active == "google" {
+                // google died mid-run -> switch to edge for the rest of the session
+                self.active = "edge".into();
+                first = self.call_backend(&chunk);
+            }
+            let translated = first.or_else(|| {
                 // fall back to one-by-one
                 let singles: Vec<Option<String>> = chunk
                     .iter()
@@ -232,7 +280,7 @@ impl Translator {
                     let v = tr[k].trim().to_string();
                     if !v.is_empty() {
                         let key = self.key(&texts[i]);
-                        self.cache.insert(key, v.clone());
+                        self.cache.insert(key, (v.clone(), now_secs()));
                         self.dirty = true;
                         result[i] = Some(v);
                     }
@@ -246,8 +294,11 @@ impl Translator {
 
     /// Returns Some(vec) with exactly lines.len() entries, or None on failure/mismatch.
     fn call_backend(&self, lines: &[String]) -> Option<Vec<String>> {
+        if self.active == "edge" {
+            return self.edge(lines);
+        }
         let joined = lines.join("\n");
-        let out = if self.backend == "openai" {
+        let out = if self.active == "openai" {
             self.openai(&joined)?
         } else {
             self.google(&joined)?
@@ -264,14 +315,65 @@ impl Translator {
         }
     }
 
+    /// Edge/Bing translator: free token from edge.microsoft.com, array in -> array out.
+    fn edge(&self, lines: &[String]) -> Option<Vec<String>> {
+        let to = match self.lang.as_str() {
+            "zh-CN" | "zh" => "zh-Hans",
+            "zh-TW" => "zh-Hant",
+            o => o,
+        };
+        for _ in 0..2 {
+            let token = {
+                let mut t = self.edge_token.borrow_mut();
+                if t.is_none() {
+                    *t = ureq::get("https://edge.microsoft.com/translate/auth")
+                        .timeout(Duration::from_secs(5))
+                        .call()
+                        .ok()
+                        .and_then(|r| r.into_string().ok());
+                }
+                t.clone()?
+            };
+            let body: Vec<Value> = lines.iter().map(|l| json!({ "Text": l })).collect();
+            let url = format!(
+                "https://api-edge.cognitive.microsofttranslator.com/translate?to={to}&api-version=3.0&includeSentenceLength=true"
+            );
+            match ureq::post(&url)
+                .set("Authorization", &format!("Bearer {token}"))
+                .timeout(Duration::from_secs(8))
+                .send_json(Value::Array(body))
+            {
+                Ok(resp) => {
+                    let v: Value = resp.into_json().ok()?;
+                    let arr = v.as_array()?;
+                    if arr.len() != lines.len() {
+                        return None;
+                    }
+                    return arr
+                        .iter()
+                        .map(|x| x["translations"][0]["text"].as_str().map(|s| s.to_string()))
+                        .collect();
+                }
+                Err(_) => {
+                    *self.edge_token.borrow_mut() = None; // token expired? refetch once
+                }
+            }
+        }
+        None
+    }
+
     fn google(&self, text: &str) -> Option<String> {
+        self.google_with(text, 8)
+    }
+
+    fn google_with(&self, text: &str, secs: u64) -> Option<String> {
         let v: Value = ureq::get("https://translate.googleapis.com/translate_a/single")
             .query("client", "gtx")
             .query("sl", "auto")
             .query("tl", &self.lang)
             .query("dt", "t")
             .query("q", text)
-            .timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(secs))
             .call()
             .ok()?
             .into_json()
@@ -387,7 +489,7 @@ fn usage() {
          \x20      t --update | --version | --alias [name]\n\
          \n\
          example: t git -h\n\
-         env: T_LANG, T_BACKEND(google|openai), T_API_BASE, T_API_KEY, T_MODEL"
+         env: T_LANG, T_BACKEND(auto|google|edge|openai), T_API_BASE, T_API_KEY, T_MODEL"
     );
 }
 
