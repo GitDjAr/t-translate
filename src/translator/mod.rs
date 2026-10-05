@@ -1,7 +1,7 @@
-//! Translator: cache + backend selection (auto = Google if reachable in 3s, else Edge/Bing).
+//! Translator: cache + backend selection (auto = Google if reachable in 3s, else Bing).
 
 mod cache;
-mod edge;
+mod bing;
 mod google;
 mod openai;
 
@@ -12,7 +12,7 @@ const GOOGLE_PROBE_SECS: u64 = 3;
 #[derive(Clone, Copy, PartialEq)]
 enum Backend {
     Google,
-    Edge,
+    Bing,
     OpenAi,
 }
 
@@ -21,7 +21,7 @@ pub struct Translator {
     backend: Backend,
     auto: bool,
     resolved: bool,
-    edge: edge::Edge,
+    bing: bing::Bing,
     openai: openai::OpenAi,
     cache: Cache,
 }
@@ -43,7 +43,7 @@ impl Translator {
         let name = std::env::var("T_BACKEND").unwrap_or_else(|_| "auto".into());
         let (backend, auto) = match name.as_str() {
             "google" => (Backend::Google, false),
-            "edge" | "bing" => (Backend::Edge, false),
+            "edge" | "bing" => (Backend::Bing, false),
             "openai" => (Backend::OpenAi, false),
             _ => (Backend::Google, true),
         };
@@ -52,20 +52,20 @@ impl Translator {
             backend,
             auto,
             resolved: !auto,
-            edge: edge::Edge::default(),
+            bing: bing::Bing::default(),
             openai: openai::OpenAi::from_env(),
             cache: Cache::new(use_cache),
         }
     }
 
-    /// auto mode: probe Google once (3s budget), otherwise use Edge/Bing.
+    /// auto mode: probe Google once (3s budget), otherwise use Bing.
     fn ensure_backend(&mut self) {
         if self.resolved {
             return;
         }
         self.resolved = true;
         if google::translate(&self.lang, "hello", GOOGLE_PROBE_SECS).is_none() {
-            self.backend = Backend::Edge;
+            self.backend = Backend::Bing;
         }
     }
 
@@ -99,8 +99,8 @@ impl Translator {
             let chunk: Vec<String> = idxs.iter().map(|&i| texts[i].trim().to_string()).collect();
             let mut first = self.call_backend(&chunk);
             if first.is_none() && self.auto && self.backend == Backend::Google {
-                // google died mid-run -> switch to edge for the rest of the session
-                self.backend = Backend::Edge;
+                // google died mid-run -> switch to bing for the rest of the session
+                self.backend = Backend::Bing;
                 first = self.call_backend(&chunk);
             }
             let translated = first.or_else(|| {
@@ -133,7 +133,7 @@ impl Translator {
     /// Some(vec) with exactly lines.len() entries, or None on failure/mismatch.
     fn call_backend(&self, lines: &[String]) -> Option<Vec<String>> {
         match self.backend {
-            Backend::Edge => self.edge.translate(&self.lang, lines),
+            Backend::Bing => self.bing.translate(&self.lang, lines),
             Backend::Google => {
                 split_lines(google::translate(&self.lang, &lines.join("\n"), 8)?, lines.len())
             }

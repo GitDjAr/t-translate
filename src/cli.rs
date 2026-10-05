@@ -16,7 +16,7 @@ pub fn usage() {
          \x20      t --update | --version | --alias [name] | --cache [clear]\n\
          \n\
          example: t git -h\n\
-         env: T_LANG, T_BACKEND(auto|google|edge|openai), T_API_BASE, T_API_KEY, T_MODEL"
+         env: T_LANG, T_BACKEND(auto|google|bing|openai), T_API_BASE, T_API_KEY, T_MODEL"
     );
 }
 

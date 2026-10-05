@@ -4,12 +4,13 @@
 //!   t --lang ja docker logs -f web
 //!
 //! Layout: cli (args) · runner (PTY + streaming pump) · render (output) ·
-//! translator/ (cache + google/edge/openai) · text (heuristics) · update · alias.
+//! translator/ (cache + google/bing/openai) · text (heuristics) · update · alias.
 
 mod alias;
 mod cli;
 mod render;
 mod runner;
+mod screen;
 mod text;
 mod translator;
 mod update;

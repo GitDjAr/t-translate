@@ -106,6 +106,31 @@ pub fn has_lone_cr(p: &[u8]) -> bool {
         .any(|(i, &b)| b == b'\r' && i + 1 < p.len() && p[i + 1] != b'\n')
 }
 
+/// Does the output repaint itself (cursor up / erase line / erase display / cursor home)?
+/// Such programs can't have lines inserted into their stream.
+pub fn has_redraw(b: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 2 < b.len() {
+        if b[i] == 0x1b && b[i + 1] == b'[' {
+            let mut j = i + 2;
+            while j < b.len() && (b[j].is_ascii_digit() || b[j] == b';' || b[j] == b'?') {
+                j += 1;
+            }
+            if j < b.len() {
+                match b[j] {
+                    b'A' | b'J' | b'H' | b'f' => return true,
+                    b'K' if &b[i + 2..j] == b"2" => return true,
+                    _ => {}
+                }
+            }
+            i = j.max(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
 pub fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
@@ -137,6 +162,15 @@ mod tests {
         assert!(!should_translate("/usr/local/bin/git"));
         assert!(!should_translate("a1b2c3d4e5f6"));
         assert!(!should_translate("已经是中文的一行"));
+    }
+
+    #[test]
+    fn redraw_detect() {
+        assert!(has_redraw(b"abc\x1b[2A\x1b[2Kdef"));
+        assert!(has_redraw(b"\x1b[2K"));
+        assert!(has_redraw(b"\x1b[H"));
+        assert!(!has_redraw(b"\x1b[31mred\x1b[0m\x1b[K plain"));
+        assert!(!has_redraw(b"\x1b[?25l"));
     }
 
     #[test]
