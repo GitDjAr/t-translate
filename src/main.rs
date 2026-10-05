@@ -89,7 +89,7 @@ fn should_translate(s: &str) -> bool {
         .split_whitespace()
         .filter(|w| w.chars().filter(|c| c.is_ascii_alphabetic()).count() >= 3)
         .count();
-    words >= 2 || (words >= 1 && (t.ends_with('?') || t.ends_with(':')))
+    words >= 2 || (words >= 1 && (t.contains('?') || t.ends_with(':')))
 }
 
 fn leading_ws(s: &str) -> &str {
