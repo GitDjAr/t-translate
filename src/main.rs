@@ -18,7 +18,8 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
-const DIM: &str = "\x1b[90m";
+// translation is the thing you read -> bright cyan; original stays as-is
+const DIM: &str = "\x1b[96m";
 const RESET: &str = "\x1b[0m";
 const BATCH_LINES: usize = 30;
 const IDLE: Duration = Duration::from_millis(200);
@@ -94,6 +95,34 @@ fn should_translate(s: &str) -> bool {
 
 fn leading_ws(s: &str) -> &str {
     &s[..s.len() - s.trim_start().len()]
+}
+
+/// For columnar help text ("  -h, --help      Show help") return the column where
+/// the description starts plus the description itself, so the translation can be
+/// aligned under it. Otherwise (indent, whole trimmed line).
+fn split_desc(s: &str) -> (usize, String) {
+    let ws = leading_ws(s).chars().count();
+    let body = s.trim_start();
+    let b = body.as_bytes();
+    let mut i = 0;
+    while i + 1 < b.len() {
+        if b[i] == b' ' && b[i + 1] == b' ' {
+            let head = &body[..i];
+            let tail = &body[i..];
+            let rest = tail.trim_start();
+            let gap = tail.len() - rest.len();
+            if !head.is_empty()
+                && head.chars().count() <= 40
+                && head.split_whitespace().count() <= 4
+                && should_translate(rest)
+            {
+                return (ws + head.chars().count() + gap, rest.trim_end().to_string());
+            }
+            break;
+        }
+        i += 1;
+    }
+    (ws, body.trim_end().to_string())
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool {
@@ -296,10 +325,13 @@ fn flush_lines(tr: &mut Translator, lines: &mut Vec<Vec<u8>>) {
     let plains: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
     let mut idx = Vec::new();
     let mut texts = Vec::new();
+    let mut cols: HashMap<usize, usize> = HashMap::new();
     for (i, p) in plains.iter().enumerate() {
-        if should_translate(p) {
+        let (col, text) = split_desc(p);
+        if should_translate(&text) {
             idx.push(i);
-            texts.push(p.clone());
+            texts.push(text);
+            cols.insert(i, col);
         }
     }
     let translated = if texts.is_empty() {
@@ -317,8 +349,9 @@ fn flush_lines(tr: &mut Translator, lines: &mut Vec<Vec<u8>>) {
     for (i, raw) in lines.iter().enumerate() {
         out.extend_from_slice(raw);
         if let Some(t) = map.get(&i) {
+            let col = cols.get(&i).copied().unwrap_or(0);
             out.extend_from_slice(
-                format!("{}{}{}{}\r\n", DIM, leading_ws(&plains[i]), t, RESET).as_bytes(),
+                format!("{}{}{}{}\r\n", " ".repeat(col), DIM, t, RESET).as_bytes(),
             );
         }
     }
@@ -349,14 +382,103 @@ fn usage() {
     eprintln!(
         "t - bilingual command output\n\n\
          usage: t [--lang <code>] [--no-cache] <command> [args...]\n\
+         \x20      t --update | --version\n\
          \n\
          example: t git -h\n\
          env: T_LANG, T_BACKEND(google|openai), T_API_BASE, T_API_KEY, T_MODEL"
     );
 }
 
+const REPO: &str = "GitDjAr/t-translate";
+
+fn asset_name() -> Option<&'static str> {
+    if cfg!(all(windows, target_arch = "x86_64")) {
+        Some("t-windows-x64.exe")
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Some("t-linux-x64")
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        Some("t-macos-arm64")
+    } else {
+        None
+    }
+}
+
+/// `t --update`: fetch latest GitHub release and replace the running binary.
+fn self_update() -> Result<(), String> {
+    let name = asset_name().ok_or("no prebuilt binary for this platform")?;
+    let api = format!("https://api.github.com/repos/{REPO}/releases/latest");
+    let v: Value = ureq::get(&api)
+        .set("User-Agent", "t-translate")
+        .timeout(Duration::from_secs(15))
+        .call()
+        .map_err(|e| format!("check failed: {e}"))?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+    let tag = v["tag_name"].as_str().ok_or("no release found")?;
+    let latest = tag.trim_start_matches('v');
+    let current = env!("CARGO_PKG_VERSION");
+    if latest == current {
+        println!("t {current} is already the latest version");
+        return Ok(());
+    }
+    let url = v["assets"]
+        .as_array()
+        .and_then(|a| a.iter().find(|x| x["name"].as_str() == Some(name)))
+        .and_then(|x| x["browser_download_url"].as_str())
+        .ok_or_else(|| format!("release {tag} has no asset {name}"))?;
+    println!("updating {current} -> {latest} ...");
+    let mut buf = Vec::new();
+    ureq::get(url)
+        .set("User-Agent", "t-translate")
+        .timeout(Duration::from_secs(180))
+        .call()
+        .map_err(|e| format!("download failed: {e}"))?
+        .into_reader()
+        .read_to_end(&mut buf)
+        .map_err(|e| e.to_string())?;
+    if buf.len() < 100_000 {
+        return Err("downloaded file looks wrong".into());
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let new = exe.with_extension("new");
+    std::fs::write(&new, &buf).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755));
+    }
+    if cfg!(windows) {
+        // a running exe can't be overwritten on Windows, but it can be renamed
+        let old = exe.with_extension("old");
+        let _ = std::fs::remove_file(&old);
+        std::fs::rename(&exe, &old).map_err(|e| e.to_string())?;
+        if let Err(e) = std::fs::rename(&new, &exe) {
+            let _ = std::fs::rename(&old, &exe); // roll back
+            return Err(e.to_string());
+        }
+    } else {
+        std::fs::rename(&new, &exe).map_err(|e| e.to_string())?;
+    }
+    println!("updated to {latest}");
+    Ok(())
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(|s| s.as_str()) {
+        Some("--update") => match self_update() {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("t: update error: {e}");
+                std::process::exit(1);
+            }
+        },
+        Some("--version") | Some("-V") => {
+            println!("t {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        _ => {}
+    }
     let mut lang = std::env::var("T_LANG").unwrap_or_else(|_| "zh-CN".into());
     let mut use_cache = true;
     loop {
@@ -562,6 +684,16 @@ mod tests {
     fn strips_ansi() {
         assert_eq!(strip_ansi(b"\x1b[31mhello\x1b[0m world\r\n"), "hello world");
         assert_eq!(strip_ansi(b"\x1b]0;title\x07abc"), "abc");
+    }
+
+    #[test]
+    fn splits_columns() {
+        let (c, t) = split_desc("  -h, --help      Show help for a command");
+        assert_eq!(c, 18);
+        assert_eq!(t, "Show help for a command");
+        let (c, t) = split_desc("  Plain sentence here");
+        assert_eq!(c, 2);
+        assert_eq!(t, "Plain sentence here");
     }
 
     #[test]

@@ -39,3 +39,4 @@ Windows 把 `t.exe` 放进 PATH 即可；Linux/macOS 放到 `/usr/local/bin`。
 - Windows 下方向键等转义输入依赖 ConPTY，需实测。
 - 窗口 resize 暂未同步给子进程。
 - 行内 `--flag` / `` `code` `` 占位符保护、术语表尚未实现。
+- TODO（低优先级）：颜色可配置（T_COLOR）、原文压暗以突出译文、`t --update` 自更新（查 GitHub Releases，Windows 先改名旧 exe 再替换）。
