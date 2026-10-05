@@ -174,10 +174,11 @@ impl Translator {
         }
     }
 
-    fn save(&self) {
+    fn save(&mut self) {
         if !self.dirty || !self.use_cache {
             return;
         }
+        self.dirty = false;
         if let Some(p) = &self.cache_path {
             if let Some(dir) = p.parent() {
                 let _ = std::fs::create_dir_all(dir);
@@ -239,6 +240,7 @@ impl Translator {
             }
             start = end;
         }
+        self.save(); // persist right away so Ctrl+C / tail -f don't lose the cache
         result
     }
 
@@ -518,6 +520,14 @@ fn make_alias(name: Option<String>) -> Result<(), String> {
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
+        Some("--cache") => {
+            let tr = Translator::new("zh-CN".into(), true);
+            match &tr.cache_path {
+                Some(p) => println!("cache: {} ({} entries)", p.display(), tr.cache.len()),
+                None => println!("cache: unavailable (no home dir)"),
+            }
+            return;
+        }
         Some("--alias") => match make_alias(args.get(1).cloned()) {
             Ok(()) => std::process::exit(0),
             Err(e) => {
