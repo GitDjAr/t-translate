@@ -1,0 +1,16 @@
+[package]
+name = "t"
+version = "0.1.0"
+edition = "2021"
+description = "Run any command and show its output with inline translation (bilingual)"
+
+[dependencies]
+portable-pty = "0.8"
+crossterm = "0.27"
+ureq = { version = "2", features = ["json"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
