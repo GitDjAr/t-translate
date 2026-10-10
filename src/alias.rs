@@ -36,8 +36,14 @@ pub fn make_alias(name: Option<String>) -> Result<(), String> {
 
     if cfg!(windows) {
         let target = dir.join(format!("{name}.cmd"));
-        std::fs::write(&target, format!("@echo off\r\n\"%~dp0{exe_file}\" %*\r\n"))
-            .map_err(|e| e.to_string())?;
+        // `tt` enables replace mode; argv[0] is t.exe through a .cmd shim,
+        // so inject the flag here (on unix the symlink name is detected instead).
+        let shim = if name == "tt" {
+            format!("@echo off\r\n\"%~dp0{exe_file}\" --replace %*\r\n")
+        } else {
+            format!("@echo off\r\n\"%~dp0{exe_file}\" %*\r\n")
+        };
+        std::fs::write(&target, shim).map_err(|e| e.to_string())?;
         println!("created {}", target.display());
     } else {
         #[cfg(unix)]

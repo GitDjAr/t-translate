@@ -18,6 +18,15 @@ mod update;
 use cli::Action;
 
 fn main() {
+    // Invoked as `tt` (e.g. via `t --alias tt`) -> replace mode: the
+    // translation takes the original's place instead of being appended.
+    // Note: use argv[0], not current_exe(), because the latter resolves symlinks.
+    let invoked_as_tt = std::env::args()
+        .next()
+        .map(|a| {
+            std::path::Path::new(&a).file_stem().and_then(|s| s.to_str()) == Some("tt")
+        })
+        .unwrap_or(false);
     let code = match cli::parse(std::env::args().skip(1).collect()) {
         Action::Version => {
             println!("t {}", env!("CARGO_PKG_VERSION"));
@@ -41,7 +50,9 @@ fn main() {
             cli::usage();
             code
         }
-        Action::Run { args, lang, use_cache } => runner::run(&args, lang, use_cache),
+        Action::Run { args, lang, use_cache, replace } => {
+            runner::run(&args, lang, use_cache, replace || invoked_as_tt)
+        }
     };
     std::process::exit(code);
 }

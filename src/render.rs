@@ -16,7 +16,10 @@ pub fn write_out(bytes: &[u8]) {
 }
 
 /// Print complete lines, each followed by its translation (if any).
-pub fn flush_lines(tr: &mut Translator, lines: &mut Vec<Vec<u8>>) {
+/// In `replace` mode the translation takes the original's place instead of
+/// being appended: for columnar help text the flag column is kept and only
+/// the description is swapped; plain lines become the translation.
+pub fn flush_lines(tr: &mut Translator, lines: &mut Vec<Vec<u8>>, replace: bool) {
     if lines.is_empty() {
         return;
     }
@@ -41,10 +44,18 @@ pub fn flush_lines(tr: &mut Translator, lines: &mut Vec<Vec<u8>>) {
     }
     let mut out: Vec<u8> = Vec::new();
     for (i, raw) in lines.iter().enumerate() {
-        out.extend_from_slice(raw);
         if let Some(t) = map.get(&i) {
             let col = cols.get(&i).copied().unwrap_or(0);
-            out.extend_from_slice(format!("{}{}{}{}\r\n", " ".repeat(col), HL, t, RESET).as_bytes());
+            if replace {
+                // keep the original layout head (indent / flag column), swap in translation
+                let head: String = plains[i].chars().take(col).collect();
+                out.extend_from_slice(format!("{head}{HL}{t}{RESET}\r\n").as_bytes());
+            } else {
+                out.extend_from_slice(raw);
+                out.extend_from_slice(format!("{}{}{}{}\r\n", " ".repeat(col), HL, t, RESET).as_bytes());
+            }
+        } else {
+            out.extend_from_slice(raw);
         }
     }
     write_out(&out);

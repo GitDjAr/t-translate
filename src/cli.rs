@@ -6,16 +6,18 @@ pub enum Action {
     Alias(Option<String>),
     Cache { clear: bool },
     Help { code: i32 },
-    Run { args: Vec<String>, lang: String, use_cache: bool },
+    Run { args: Vec<String>, lang: String, use_cache: bool, replace: bool },
 }
 
 pub fn usage() {
     eprintln!(
         "t - bilingual command output\n\n\
-         usage: t [--lang <code>] [--no-cache] <command> [args...]\n\
+         usage: t [--lang <code>] [--no-cache] [--replace] <command> [args...]\n\
          \x20      t --update | --version | --alias [name] | --cache [clear]\n\
          \n\
          example: t git -h\n\
+         \x20         t --replace git -h   # translation replaces the original\n\
+         \x20         tt git -h            # same, via `t --alias tt`\n\
          env: T_LANG, T_BACKEND(auto|google|bing|openai), T_API_BASE, T_API_KEY, T_MODEL"
     );
 }
@@ -30,6 +32,7 @@ pub fn parse(mut args: Vec<String>) -> Action {
     }
     let mut lang = std::env::var("T_LANG").unwrap_or_else(|_| "zh-CN".into());
     let mut use_cache = true;
+    let mut replace = false;
     loop {
         match args.first().map(|s| s.as_str()) {
             Some("--lang") if args.len() >= 2 => {
@@ -38,6 +41,10 @@ pub fn parse(mut args: Vec<String>) -> Action {
             }
             Some("--no-cache") => {
                 use_cache = false;
+                args.remove(0);
+            }
+            Some("--replace") | Some("--all") | Some("-all") => {
+                replace = true;
                 args.remove(0);
             }
             _ => break,
@@ -49,5 +56,5 @@ pub fn parse(mut args: Vec<String>) -> Action {
     if args[0] == "-h" || args[0] == "--help" {
         return Action::Help { code: 0 };
     }
-    Action::Run { args, lang, use_cache }
+    Action::Run { args, lang, use_cache, replace }
 }

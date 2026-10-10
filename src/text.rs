@@ -135,6 +135,150 @@ pub fn contains(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
+/// Path of the user glossary: one never-translate term per line.
+/// `~/.t-translate/no_translate.txt` (same dir as the cache).
+pub fn glossary_path() -> Option<std::path::PathBuf> {
+    std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".t-translate").join("no_translate.txt"))
+}
+
+/// Load the user glossary, longest terms first so they win on overlap.
+/// Missing file -> empty vec.
+pub fn load_glossary() -> Vec<String> {
+    let mut v: Vec<String> = glossary_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| {
+            s.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort_by(|a, b| b.len().cmp(&a.len()));
+    v.dedup();
+    v
+}
+
+fn push_term(out: &mut String, terms: &mut Vec<String>, term: &str) {
+    out.push_str(&format!("__T{}__", terms.len()));
+    terms.push(term.to_string());
+}
+
+fn boundary_before(b: &[u8], i: usize) -> bool {
+    i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_')
+}
+
+fn boundary_after(b: &[u8], j: usize) -> bool {
+    j >= b.len() || !(b[j].is_ascii_alphanumeric() || b[j] == b'_')
+}
+
+/// Mask terms that must survive translation untouched and return
+/// `(masked_text, terms)`; restore with [`restore_terms`].
+///
+/// Protected, in priority order:
+/// 1. `` `code` `` spans (single line)
+/// 2. user glossary terms (longest first)
+/// 3. `--long-flag` options
+/// 4. `-f` short flags
+/// 5. alphanumeric tokens mixing letters and digits (`win10`, `pshell5`, `utf-8`)
+pub fn protect_terms(s: &str, glossary: &[String]) -> (String, Vec<String>) {
+    let mut out = String::with_capacity(s.len());
+    let mut terms: Vec<String> = Vec::new();
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        // 1. `code` span
+        if b[i] == b'`' {
+            let mut j = i + 1;
+            while j < b.len() && b[j] != b'`' && b[j] != b'\n' {
+                j += 1;
+            }
+            if j < b.len() && b[j] == b'`' && j > i + 1 {
+                push_term(&mut out, &mut terms, &s[i..=j]);
+                i = j + 1;
+                continue;
+            }
+        }
+        // 2. user glossary
+        let mut gmatched: Option<&str> = None;
+        for g in glossary {
+            if s[i..].starts_with(g.as_str())
+                && boundary_before(b, i)
+                && boundary_after(b, i + g.len())
+            {
+                gmatched = Some(g);
+                break;
+            }
+        }
+        if let Some(g) = gmatched {
+            push_term(&mut out, &mut terms, g);
+            i += g.len();
+            continue;
+        }
+        // 3. --long-flag
+        if s[i..].starts_with("--") && boundary_before(b, i) {
+            let mut j = i + 2;
+            if j < b.len() && b[j].is_ascii_alphanumeric() {
+                j += 1;
+                while j < b.len()
+                    && (b[j].is_ascii_alphanumeric() || b[j] == b'-' || b[j] == b'_')
+                {
+                    j += 1;
+                }
+                push_term(&mut out, &mut terms, &s[i..j]);
+                i = j;
+                continue;
+            }
+        }
+        // 4. -f short flag
+        if b[i] == b'-'
+            && boundary_before(b, i)
+            && i + 1 < b.len()
+            && b[i + 1].is_ascii_alphabetic()
+        {
+            push_term(&mut out, &mut terms, &s[i..i + 2]);
+            i += 2;
+            continue;
+        }
+        // 5. letter+digit token (win10, pshell5, ...)
+        if b[i].is_ascii_alphanumeric() {
+            let mut j = i;
+            while j < b.len()
+                && (b[j].is_ascii_alphanumeric() || b[j] == b'.' || b[j] == b'-' || b[j] == b'_')
+            {
+                j += 1;
+            }
+            while j > i && (b[j - 1] == b'.' || b[j - 1] == b'-' || b[j - 1] == b'_') {
+                j -= 1;
+            }
+            let tok = &s[i..j];
+            if tok.bytes().any(|c| c.is_ascii_alphabetic())
+                && tok.bytes().any(|c| c.is_ascii_digit())
+            {
+                push_term(&mut out, &mut terms, tok);
+                i = j;
+                continue;
+            }
+        }
+        let ch = s[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    (out, terms)
+}
+
+/// Put protected terms back into translated text.
+/// Placeholders the backend mangled are left as-is.
+pub fn restore_terms(s: &str, terms: &[String]) -> String {
+    let mut out = s.to_string();
+    for (i, t) in terms.iter().enumerate() {
+        out = out.replace(&format!("__T{i}__"), t);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,5 +325,44 @@ mod tests {
         assert!(has_lone_cr(b"10%\r20%"));
         assert!(!has_lone_cr(b"line\r\n"));
         assert!(!has_lone_cr(b"line\r"));
+    }
+
+    #[test]
+    fn protects_mixed_terms() {
+        let g = vec!["PowerShell".to_string()];
+        let (m, t) = protect_terms("Install PowerShell on win10 with `choco install` --force", &g);
+        assert_eq!(t, vec!["PowerShell", "win10", "`choco install`", "--force"]);
+        assert_eq!(m, "Install __T0__ on __T1__ with __T2__ __T3__");
+        assert_eq!(
+            restore_terms(&m, &t),
+            "Install PowerShell on win10 with `choco install` --force"
+        );
+    }
+
+    #[test]
+    fn protects_short_flags_and_versions() {
+        let (m, t) = protect_terms("use -f to force, needs pshell5 and v1.2.3", &[]);
+        assert_eq!(t, vec!["-f", "pshell5", "v1.2.3"]);
+        assert_eq!(m, "use __T0__ to force, needs __T1__ and __T2__");
+        assert_eq!(restore_terms(&m, &t), "use -f to force, needs pshell5 and v1.2.3");
+    }
+
+    #[test]
+    fn protect_leaves_plain_text_alone() {
+        let (m, t) = protect_terms("version 2 of the tool", &[]);
+        assert!(t.is_empty());
+        assert_eq!(m, "version 2 of the tool");
+        // unterminated backtick is not a code span
+        let (m, _) = protect_terms("say `hi", &[]);
+        assert_eq!(m, "say `hi");
+    }
+
+    #[test]
+    fn glossary_needs_boundaries() {
+        // "win10x" must not match glossary term "win10"; the whole token is protected instead
+        let g = vec!["win10".to_string()];
+        let (m, t) = protect_terms("win10x is not win10", &g);
+        assert_eq!(t, vec!["win10x", "win10"]);
+        assert_eq!(m, "__T0__ is not __T1__");
     }
 }

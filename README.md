@@ -29,6 +29,8 @@ GitHub 访问慢时，可设置镜像前缀：`$env:T_MIRROR="https://ghfast.top
 | 命令 | 说明 |
 |---|---|
 | `t <命令...>` | 运行命令并输出对照翻译 |
+| `t --replace <命令...>`（或 `t -all` / `t --all`） | 译文替换原文，而非追加在原文下方 |
+| `tt <命令...>` | 同上（`t --alias tt` 创建，命令名为 tt 时自动启用替换模式） |
 | `t --update` | 更新到最新 Release |
 | `t --alias [名字]` | 创建别名（会检查 PATH 冲突），例如 `tt` |
 | `t --cache [clear]` | 查看 / 清空缓存 |
@@ -45,10 +47,13 @@ GitHub 访问慢时，可设置镜像前缀：`$env:T_MIRROR="https://ghfast.top
 | T_API_KEY / T_MODEL | openai 后端的 Key / 模型 | - / gpt-4o-mini |
 
 缓存：`~/.t-translate/cache.json`，有效期 30 天，`--no-cache` 关闭。
+术语保护：`` `code` `` 片段、`--flag` 参数、字母数字混合词（如 win10、pshell5）不会被翻译；
+`~/.t-translate/no_translate.txt` 可加自定义词（每行一个，`#` 开头为注释）。
 
 ## 行为
 
 - 普通输出：整行批量翻译，原文下方亮青色译文；帮助文档的两栏格式会把译文对齐到说明列。
+- 替换模式（`t --replace` / `tt`）：只输出译文，不输出原文；帮助文档保留 flag 列、说明列换成译文。屏幕模式与交互提示不受影响。
 - 流式输出（`tail -f`、`docker logs -f`）：每批最多等待 500ms 就翻译，持续不断的输出也不会卡住。
 - 交互提示（以 `:` `?` `)` `]` `>` 结尾、空闲 200ms）：在提示后追加 `(译文)`，输入照常转发。
 - 未结束且不像提示的半行（如逐字输出）：800ms 后原样输出，不会卡住。
@@ -88,4 +93,4 @@ install.ps1 / install.sh   一键安装脚本
 
 - 颜色可配置（T_COLOR）、原文压暗。
 - 窗口 resize 同步给子进程。
-- 行内 `--flag` / `` `code` `` 占位符保护、术语表。
+- 隐私脱敏：输出含 token/key/password 等敏感信息时跳过翻译或打码。

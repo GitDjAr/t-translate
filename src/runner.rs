@@ -42,6 +42,7 @@ struct Pump {
     passthrough: bool, // fallback when screen mode isn't possible (no tty / tiny window)
     skip: bool,        // rest of this line goes through raw (prompt echo, partial, progress)
     screen: Option<ScreenState>,
+    replace: bool, // translation replaces the original instead of being appended
 }
 
 fn pty_size(rows: u16, cols: u16) -> PtySize {
@@ -70,7 +71,7 @@ impl Pump {
     fn flush_lines(&mut self) {
         {
             let mut tr = self.tr.lock().unwrap();
-            flush_lines(&mut tr, &mut self.lines);
+            flush_lines(&mut tr, &mut self.lines, self.replace);
         }
         self.pending_since = None;
     }
@@ -279,7 +280,7 @@ impl Pump {
     }
 }
 
-pub fn run(args: &[String], lang: String, use_cache: bool) -> i32 {
+pub fn run(args: &[String], lang: String, use_cache: bool, replace: bool) -> i32 {
     let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 30));
     let pair = match native_pty_system().openpty(pty_size(rows, cols)) {
         Ok(p) => p,
@@ -390,6 +391,7 @@ pub fn run(args: &[String], lang: String, use_cache: bool) -> i32 {
         passthrough: false,
         skip: false,
         screen: None,
+        replace,
     };
 
     let mut exit_code: Option<u32> = None;

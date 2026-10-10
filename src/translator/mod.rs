@@ -24,6 +24,7 @@ pub struct Translator {
     bing: bing::Bing,
     openai: openai::OpenAi,
     cache: Cache,
+    glossary: Vec<String>,
 }
 
 fn split_lines(out: String, n: usize) -> Option<Vec<String>> {
@@ -55,6 +56,7 @@ impl Translator {
             bing: bing::Bing::default(),
             openai: openai::OpenAi::from_env(),
             cache: Cache::new(use_cache),
+            glossary: crate::text::load_glossary(),
         }
     }
 
@@ -74,7 +76,18 @@ impl Translator {
     }
 
     /// Translate many lines. Returns one Option per input.
+    ///
+    /// TODO(privacy, 2026-10-10): printed output sometimes contains secrets
+    /// (token/key/secret/password/pwd/api_key). Detect such patterns here and
+    /// either skip translation or redact them before calling backends.
+    /// Deferred per user request.
     pub fn translate_batch(&mut self, texts: &[String]) -> Vec<Option<String>> {
+        // Mask terms that must not be translated (`code`, --flags, win10, ...).
+        // Cache keys keep using the original text so entries stay stable.
+        let masked: Vec<(String, Vec<String>)> = texts
+            .iter()
+            .map(|t| crate::text::protect_terms(t, &self.glossary))
+            .collect();
         let mut result: Vec<Option<String>> = vec![None; texts.len()];
         let mut todo: Vec<usize> = Vec::new();
         for (i, t) in texts.iter().enumerate() {
@@ -92,11 +105,11 @@ impl Translator {
             let mut end = start;
             let mut size = 0;
             while end < todo.len() && (size < 1500 || end == start) {
-                size += texts[todo[end]].len() + 1;
+                size += masked[todo[end]].0.len() + 1;
                 end += 1;
             }
             let idxs = &todo[start..end];
-            let chunk: Vec<String> = idxs.iter().map(|&i| texts[i].trim().to_string()).collect();
+            let chunk: Vec<String> = idxs.iter().map(|&i| masked[i].0.trim().to_string()).collect();
             let mut first = self.call_backend(&chunk);
             if first.is_none() && self.auto && self.backend == Backend::Google {
                 // google died mid-run -> switch to bing for the rest of the session
@@ -117,7 +130,7 @@ impl Translator {
             });
             if let Some(tr) = translated {
                 for (k, &i) in idxs.iter().enumerate() {
-                    let v = tr[k].trim().to_string();
+                    let v = crate::text::restore_terms(tr[k].trim(), &masked[i].1);
                     if !v.is_empty() {
                         self.cache.insert(Cache::key(&self.lang, &texts[i]), v.clone());
                         result[i] = Some(v);
